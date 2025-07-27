@@ -105,6 +105,11 @@ class CalcZernikesNeuralTaskConfig(
         doc="datasetparam path",
         dtype=str
     )
+    device = pexConfig.Field(
+        doc="Device to use for calculations",
+        dtype=str,
+        default="cuda"
+    )
 
 
     
@@ -125,6 +130,34 @@ class CalcZernikesNeuralTask(pipeBase.PipelineTask, metaclass=abc.ABCMeta):
                                           self.config.aggregatornet_path)
         self.NAOS = self.NAOS.eval()
         self.CROP_SIZE = self.NAOS.CROP_SIZE
+        self.device = self.config.device
+        
+        if self.device == "cpu":
+            self.NAOS = self.NAOS.cpu()
+
+        # Update device attributes for all sub-models to CPU
+        self.NAOS.device_val = torch.device("cpu")
+        if hasattr(self.NAOS.alignnet_model, 'device_val'):
+            self.NAOS.alignnet_model.device_val = torch.device("cpu")
+        if hasattr(self.NAOS.wavenet_model, 'device_val'):
+            self.NAOS.wavenet_model.device_val = torch.device("cpu")
+        if hasattr(self.NAOS.aggregatornet_model, 'device_val'):
+            self.NAOS.aggregatornet_model.device_val = torch.device("cpu")
+
+        # Update device attributes for the underlying models
+        if hasattr(self.NAOS.alignnet_model.alignnet, 'device_val'):
+            self.NAOS.alignnet_model.alignnet.device_val = torch.device("cpu")
+        if hasattr(self.NAOS.wavenet_model.wavenet, 'device_val'):
+            self.NAOS.wavenet_model.wavenet.device_val = torch.device("cpu")
+
+        # Ensure all CNN models within the sub-models are also on CPU
+        if hasattr(self.NAOS.alignnet_model.alignnet, 'cnn'):
+            self.NAOS.alignnet_model.alignnet.cnn = self.NAOS.alignnet_model.alignnet.cnn.cpu()
+        if hasattr(self.NAOS.wavenet_model.wavenet, 'cnn'):
+            self.NAOS.wavenet_model.wavenet.cnn = self.NAOS.wavenet_model.wavenet.cnn.cpu()
+
+        else:
+            self.NAOS.to("cuda")
         
 
     def calc_exposure(self, exposure):
@@ -132,7 +165,7 @@ class CalcZernikesNeuralTask(pipeBase.PipelineTask, metaclass=abc.ABCMeta):
         Calculate the Zernike coefficients for an exposure.
         """
         with torch.no_grad():
-            pred = self.NAOS.run_deploy(exposure)
+            pred = self.NAOS.deploy_run(exposure)
         return pred
 
     def empty(self, qualityTable=None) -> pipeBase.Struct:
@@ -178,12 +211,13 @@ class CalcZernikesNeuralTask(pipeBase.PipelineTask, metaclass=abc.ABCMeta):
         IntraExposure,
     ) -> pipeBase.Struct:
 
-        pred_intra = self.calc_exposure(IntraExposure)
-        pred_extra = self.calc_exposure(ExtraExposure)
+        pred_intra = self.calc_exposure(IntraExposure) #gives microns
+        pred_extra = self.calc_exposure(ExtraExposure) #gives microns
+
+        zernikes_Raw = np.stack([pred_intra, pred_extra], axis=0)
+        zernikes_Avg = np.mean(zernikes_Raw, axis=0)
 
         return pipeBase.Struct(
-            outputZernikesAvg=np.atleast_2d(np.array(zkCoeffCombined.combinedZernikes)),
-            outputZernikesRaw=np.atleast_2d(np.array(zkCoeffRaw.zernikes)),
-            zernikes=zkTable,
-            donutQualityTable=donutQualityTable,
+            outputZernikesAvg=zernikes_Avg,
+            outputZernikesRaw=zernikes_Raw
         )
